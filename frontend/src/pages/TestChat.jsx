@@ -104,15 +104,26 @@ const TestChat = () => {
                                 data: backendResponse.data
                             };
 
+                            console.log('[CHAT] API call successful, formatting response with LLM...');
+                            console.log('[CHAT] Data received:', backendResponse.data);
+
                             // Ask LLM to format the response with the data
                             const dataMessage = {
-                                role: 'system',
-                                content: `The external API returned this data: ${JSON.stringify(backendResponse.data)}. Please format this information in a user-friendly way to answer the user's question.`
+                                role: 'user',
+                                content: `The external API returned this data: ${JSON.stringify(backendResponse.data, null, 2)}. Please format this information in a user-friendly, natural language way to answer my original question.`
                             };
 
-                            const formattedResponse = await callLLM([...conversationHistory, dataMessage], freshConfig);
-                            finalResponse = formattedResponse;
+                            try {
+                                const formattedResponse = await callLLM([...conversationHistory, dataMessage], freshConfig);
+                                console.log('[CHAT] LLM formatted response:', formattedResponse);
+                                finalResponse = formattedResponse;
+                            } catch (formatError) {
+                                console.error('[CHAT] Error formatting response with LLM:', formatError);
+                                // Fallback to showing raw data if LLM formatting fails
+                                finalResponse = `I successfully retrieved the data:\n\n${JSON.stringify(backendResponse.data, null, 2)}`;
+                            }
                         } else {
+                            console.log('[CHAT] API call failed:', backendResponse.error);
                             finalResponse = `I tried to fetch that information, but encountered an error: ${backendResponse.error}`;
                             apiCallInfo = {
                                 query: parsed.query,

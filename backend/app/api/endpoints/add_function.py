@@ -108,8 +108,14 @@ async def add_function_to_connector(
                 spec["paths"][path][method] = operation
         
         # Update the connector in the database
+        # Important: SQLAlchemy doesn't auto-detect changes to mutable JSON objects
+        # We need to explicitly mark it as modified
+        from sqlalchemy.orm.attributes import flag_modified
+        
         connector.full_schema_json = spec
+        flag_modified(connector, "full_schema_json")  # Mark as modified for SQLAlchemy
         db.commit()
+        db.refresh(connector)  # Refresh to get the latest state
         
         # Re-process the connector to update vector DB
         # Simulate user_id
@@ -129,6 +135,84 @@ async def add_function_to_connector(
             "message": f"Added {len(new_paths)} path(s) to connector '{connector.name}'",
             "conflicts": conflicts if conflicts else None,
             "paths_added": list(new_paths.keys())
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/{connector_id}/function")
+async def delete_function_from_connector(
+    connector_id: str,
+    path: str,
+    method: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Delete a specific function/endpoint from an existing connector.
+    
+    Parameters:
+    - path: The API path (e.g., "/pets/{petId}")
+    - method: The HTTP method (e.g., "get", "post")
+    """
+    try:
+        # Get the connector
+        connector = db.query(Connector).filter(Connector.connector_id == connector_id).first()
+        if not connector:
+            raise HTTPException(status_code=404, detail="Connector not found")
+        
+        # Get existing OpenAPI spec
+        spec = connector.full_schema_json
+        if "paths" not in spec or path not in spec["paths"]:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Path '{path}' not found in connector"
+            )
+        
+        # Check if method exists
+        method_lower = method.lower()
+        if method_lower not in spec["paths"][path]:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Method {method.upper()} not found for path '{path}'"
+            )
+        
+        # Get operation ID before deletion for vector DB cleanup
+        operation_id = spec["paths"][path][method_lower].get("operationId", f"{method_lower}_{path.replace('/', '_')}")
+        
+        # Delete the method
+        del spec["paths"][path][method_lower]
+        
+        # If path has no more methods, delete the path entirely
+        if not spec["paths"][path]:
+            del spec["paths"][path]
+        
+        # Update the connector in the database
+        from sqlalchemy.orm.attributes import flag_modified
+        
+        connector.full_schema_json = spec
+        flag_modified(connector, "full_schema_json")
+        db.commit()
+        db.refresh(connector)
+        
+        # Re-process the connector to update vector DB
+        # This will remove the old function and re-index remaining ones
+        user_id = "demo-user-123"
+        try:
+            process_and_store_connector_chunks(spec, connector.connector_id, user_id)
+        except Exception as e:
+            # Rollback the database change if vector DB update fails
+            db.rollback()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to update vector database: {str(e)}"
+            )
+        
+        return {
+            "status": "SUCCESS",
+            "message": f"Deleted {method.upper()} {path} from connector '{connector.name}'",
+            "operation_id": operation_id
         }
         
     except HTTPException:

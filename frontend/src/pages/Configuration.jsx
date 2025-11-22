@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Save, Server, Cpu } from 'lucide-react';
+import { Save, Server, Cpu, Key, Copy, RefreshCw, Eye, EyeOff } from 'lucide-react';
 import axios from 'axios';
 
 const PROVIDERS = {
@@ -11,7 +11,7 @@ const PROVIDERS = {
     anthropic: {
         name: 'Anthropic',
         models: ['claude-3-5-sonnet-20240620', 'claude-3-opus-20240229', 'claude-3-sonnet-20240229', 'claude-3-haiku-20240307'],
-        embeddingModels: [] // Anthropic doesn't strictly have embedding models in the same way, usually use others
+        embeddingModels: []
     },
     google: {
         name: 'Google Gemini',
@@ -27,31 +27,28 @@ const PROVIDERS = {
 
 const Configuration = () => {
     const [config, setConfig] = useState({
-        // Agent LLM
         agentProvider: 'openai',
         agentModel: 'gpt-4o',
-
-        // Embeddings
         embeddingProvider: 'openai',
         embeddingModel: 'text-embedding-3-small',
-
-        // Keys
         openaiApiKey: '',
         anthropicApiKey: '',
         googleApiKey: '',
-
-        // System
         logLevel: 'INFO'
     });
+
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
+    const [apiKey, setApiKey] = useState('');
+    const [apiKeyLoading, setApiKeyLoading] = useState(false);
+    const [showApiKey, setShowApiKey] = useState(false);
+    const [apiKeyCopied, setApiKeyCopied] = useState(false);
 
     useEffect(() => {
         const fetchConfig = async () => {
             try {
                 const response = await axios.get('/api/v1/config/');
                 if (response.data) {
-                    // Merge defaults with response to handle missing keys
                     setConfig(prev => ({ ...prev, ...response.data }));
                 }
             } catch (error) {
@@ -63,12 +60,52 @@ const Configuration = () => {
         fetchConfig();
     }, []);
 
-    // Reset model when provider changes
+    useEffect(() => {
+        fetchApiKey();
+    }, []);
+
+    const fetchApiKey = async () => {
+        setApiKeyLoading(true);
+        try {
+            const response = await axios.get('/api/v1/config/api-key');
+            setApiKey(response.data.api_key);
+        } catch (error) {
+            console.error('Error fetching API key:', error);
+        } finally {
+            setApiKeyLoading(false);
+        }
+    };
+
+    const handleRegenerateApiKey = async () => {
+        if (!confirm('Are you sure you want to regenerate the API key? The old key will stop working.')) {
+            return;
+        }
+
+        setApiKeyLoading(true);
+        try {
+            const response = await axios.post('/api/v1/config/api-key/regenerate');
+            setApiKey(response.data.api_key);
+            setShowApiKey(true);
+            alert('New API key generated successfully!');
+        } catch (error) {
+            console.error('Error regenerating API key:', error);
+            alert('Failed to regenerate API key');
+        } finally {
+            setApiKeyLoading(false);
+        }
+    };
+
+    const handleCopyApiKey = () => {
+        navigator.clipboard.writeText(apiKey);
+        setApiKeyCopied(true);
+        setTimeout(() => setApiKeyCopied(false), 2000);
+    };
+
     const handleProviderChange = (type, provider) => {
         setConfig(prev => ({
             ...prev,
             [`${type}Provider`]: provider,
-            [`${type}Model`]: PROVIDERS[provider].models[0] || '' // Default to first model
+            [`${type}Model`]: PROVIDERS[provider].models[0] || ''
         }));
     };
 
@@ -105,9 +142,8 @@ const Configuration = () => {
                 <p className="text-gray-600 mt-1">Configure AI models, providers, and system settings.</p>
             </div>
 
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-6">
                 <form onSubmit={handleSubmit} className="p-6 space-y-8">
-
                     {/* Agent LLM Configuration */}
                     <section>
                         <div className="flex items-center gap-2 mb-4 text-indigo-600">
@@ -193,7 +229,7 @@ const Configuration = () => {
 
                     {/* API Keys */}
                     <section>
-                        <h3 className="text-lg font-semibold text-gray-800 mb-4">API Credentials</h3>
+                        <h3 className="text-lg font-semibold text-gray-800 mb-4">LLM API Credentials</h3>
                         <div className="grid gap-6">
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">OpenAI API Key</label>
@@ -242,6 +278,66 @@ const Configuration = () => {
                         </button>
                     </div>
                 </form>
+            </div>
+
+            {/* API Key Management Section */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                <div className="px-6 py-4 border-b border-gray-100 bg-gray-50">
+                    <div className="flex items-center gap-2 text-indigo-600">
+                        <Key size={24} />
+                        <h3 className="text-lg font-semibold text-gray-800">Application API Key</h3>
+                    </div>
+                    <p className="text-sm text-gray-500 mt-1">API key for external chatbots and integrations</p>
+                </div>
+
+                <div className="p-6 space-y-4">
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Your API Key</label>
+                        <div className="flex gap-2">
+                            <div className="flex-1 relative">
+                                <input
+                                    type={showApiKey ? "text" : "password"}
+                                    value={apiKey}
+                                    readOnly
+                                    className="w-full px-4 py-2 pr-12 border border-gray-300 rounded-lg bg-gray-50 font-mono text-sm"
+                                />
+                                <button
+                                    type="button"
+                                    onClick={() => setShowApiKey(!showApiKey)}
+                                    className="absolute right-2 top-1/2 -translate-y-1/2 p-2 text-gray-500 hover:text-gray-700"
+                                >
+                                    {showApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                                </button>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={handleCopyApiKey}
+                                className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors flex items-center gap-2"
+                            >
+                                <Copy size={16} />
+                                {apiKeyCopied ? 'Copied!' : 'Copy'}
+                            </button>
+                        </div>
+                        <p className="text-xs text-gray-500 mt-2">
+                            Use this key in the <code className="bg-gray-100 px-1 rounded">X-API-Key</code> header when making requests to the API
+                        </p>
+                    </div>
+
+                    <div className="pt-2">
+                        <button
+                            type="button"
+                            onClick={handleRegenerateApiKey}
+                            disabled={apiKeyLoading}
+                            className="flex items-center gap-2 px-4 py-2 border border-red-300 text-red-600 rounded-lg hover:bg-red-50 transition-colors disabled:opacity-50"
+                        >
+                            <RefreshCw size={16} className={apiKeyLoading ? 'animate-spin' : ''} />
+                            {apiKeyLoading ? 'Generating...' : 'Regenerate API Key'}
+                        </button>
+                        <p className="text-xs text-gray-500 mt-2">
+                            ⚠️ Warning: Regenerating will invalidate the current key. Update all integrations with the new key.
+                        </p>
+                    </div>
+                </div>
             </div>
         </div>
     );

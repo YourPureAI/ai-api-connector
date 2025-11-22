@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import axios from 'axios';
-import { Lock, Save, Code, FileText, Globe } from 'lucide-react';
+import { Lock, Save, Code, FileText, Globe, Trash2 } from 'lucide-react';
 
 const ConnectorDetail = () => {
     const { id } = useParams();
@@ -61,17 +61,42 @@ const ConnectorDetail = () => {
                 format: functionFormat
             });
 
+            console.log('Add function response:', response.data);
+
             alert(response.data.message + (response.data.conflicts ? `\n\nWarning: Overwrote existing functions: ${response.data.conflicts.join(', ')}` : ''));
             setFunctionDef('');
 
             // Refresh connector data
             const updatedConnector = await axios.get(`/api/v1/connectors/${id}`);
+            console.log('Updated connector:', updatedConnector.data);
+            console.log('Updated paths:', updatedConnector.data.full_schema_json?.paths);
             setConnector(updatedConnector.data);
         } catch (error) {
             console.error("Error adding function:", error);
             alert(error.response?.data?.detail || "Failed to add function");
         } finally {
             setAddingFunction(false);
+        }
+    };
+
+    const handleDeleteFunction = async (path, method) => {
+        if (!confirm(`Are you sure you want to delete ${method.toUpperCase()} ${path}?\n\nThis will remove the function from the connector and vector database.`)) {
+            return;
+        }
+
+        try {
+            const response = await axios.delete(`/api/v1/connectors/${id}/function`, {
+                params: { path, method }
+            });
+
+            alert(response.data.message);
+
+            // Refresh connector data
+            const updatedConnector = await axios.get(`/api/v1/connectors/${id}`);
+            setConnector(updatedConnector.data);
+        } catch (error) {
+            console.error("Error deleting function:", error);
+            alert(error.response?.data?.detail || "Failed to delete function");
         }
     };
 
@@ -253,8 +278,8 @@ const ConnectorDetail = () => {
                             onClick={handleAddFunction}
                             disabled={addingFunction || !functionDef.trim()}
                             className={`w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-white font-medium transition-colors ${addingFunction || !functionDef.trim()
-                                    ? 'bg-gray-300 cursor-not-allowed'
-                                    : 'bg-indigo-600 hover:bg-indigo-700'
+                                ? 'bg-gray-300 cursor-not-allowed'
+                                : 'bg-indigo-600 hover:bg-indigo-700'
                                 }`}
                         >
                             <Code size={16} />
@@ -263,6 +288,7 @@ const ConnectorDetail = () => {
                     </div>
                 </div>
 
+                {/* Available Functions */}
                 <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
                     <div className="px-6 py-4 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
                         <h3 className="font-semibold text-gray-800 flex items-center gap-2">
@@ -295,6 +321,13 @@ const ConnectorDetail = () => {
                                             </div>
                                             <p className="text-sm text-gray-600 line-clamp-2">{details.summary || details.description || "No description available"}</p>
                                         </div>
+                                        <button
+                                            onClick={() => handleDeleteFunction(path, method)}
+                                            className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors"
+                                            title="Delete this function"
+                                        >
+                                            <Trash2 size={16} />
+                                        </button>
                                     </div>
                                 </div>
                             ))

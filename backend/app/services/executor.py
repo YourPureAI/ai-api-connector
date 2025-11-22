@@ -86,10 +86,23 @@ class APIExecutor:
             # Build full URL
             full_url = f"{base_url.rstrip('/')}{path}"
             
+            print(f"[EXECUTOR] Original path: {path}")
+            print(f"[EXECUTOR] Parameters received: {parameters}")
+            print(f"[EXECUTOR] URL before replacement: {full_url}")
+            
             # Replace path parameters if any
             if parameters:
                 for key, value in parameters.items():
-                    full_url = full_url.replace(f"{{{key}}}", str(value))
+                    placeholder = f"{{{key}}}"
+                    if placeholder in full_url:
+                        full_url = full_url.replace(placeholder, str(value))
+                        print(f"[EXECUTOR] Replaced {placeholder} with {value}")
+                    else:
+                        print(f"[EXECUTOR] Warning: {placeholder} not found in URL")
+            else:
+                print(f"[EXECUTOR] No parameters to replace!")
+            
+            print(f"[EXECUTOR] Final URL: {full_url}")
             
             # Make the request
             async with httpx.AsyncClient(timeout=30.0) as client:

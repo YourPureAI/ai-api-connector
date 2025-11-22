@@ -6,6 +6,7 @@ from app.db.session import get_db
 from app.db.models import Connector
 from app.services.vector_db import vector_db
 from app.services.executor import executor
+import re
 
 router = APIRouter()
 
@@ -78,22 +79,59 @@ async def query_data(
         # Extract parameters from the query if needed
         parameters = request.parameters or {}
         
-        # If path has parameters (e.g., {orderId}), try to extract them from the query
+        print(f"[QUERY] User query: {request.query}")
+        print(f"[QUERY] Matched path: {path}")
+        print(f"[QUERY] Matched method: {method}")
+        
+        # If path has parameters, use LLM to extract them intelligently
         if "{" in path and "}" in path:
-            import re
-            # Find all path parameters
-            path_params = re.findall(r'\{(\w+)\}', path)
+            print(f"[QUERY] Path contains parameters, attempting extraction...")
             
-            # Try to extract values from the natural language query
-            query_lower = request.query.lower()
-            for param in path_params:
-                if param not in parameters:
-                    # Look for common patterns like "id 10", "pet 5", "order 20"
-                    # Try to find numbers in the query
-                    numbers = re.findall(r'\b\d+\b', request.query)
-                    if numbers:
-                        # Use the last number found (usually the most specific)
-                        parameters[param] = numbers[-1]
+            # Get the operation details from the OpenAPI spec
+            spec = connector.full_schema_json
+            operation_spec = spec.get("paths", {}).get(path, {}).get(method.lower(), {})
+            
+            # Get parameter definitions
+            param_definitions = operation_spec.get("parameters", [])
+            
+            print(f"[QUERY] Found {len(param_definitions)} parameter definitions")
+            
+            if param_definitions:
+                # Use LLM to extract parameters
+                from app.services.llm_service import extract_parameters_with_llm
+                
+                print(f"[QUERY] Calling LLM for parameter extraction...")
+                try:
+                    extracted_params = await extract_parameters_with_llm(
+                        query=request.query,
+                        param_definitions=param_definitions,
+                        operation_summary=operation_spec.get("summary", ""),
+                        operation_description=operation_spec.get("description", "")
+                    )
+                    print(f"[QUERY] LLM extracted parameters: {extracted_params}")
+                except Exception as e:
+                    print(f"[QUERY] LLM extraction failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    extracted_params = {}
+                
+                # Merge extracted parameters with any explicitly provided ones
+                parameters = {**extracted_params, **parameters}
+            else:
+                print(f"[QUERY] No parameter definitions, using fallback regex extraction")
+                # Fallback to regex-based extraction if no parameter definitions
+                path_params = re.findall(r'\{(\w+)\}', path)
+                query_lower = request.query.lower()
+                
+                for param in path_params:
+                    if param not in parameters:
+                        # Try to find numbers in the query
+                        numbers = re.findall(r'\b\d+\b', request.query)
+                        if numbers:
+                            parameters[param] = numbers[-1]
+                            print(f"[QUERY] Regex extracted {param} = {numbers[-1]}")
+        
+        print(f"[QUERY] Final parameters to pass to executor: {parameters}")
         
         # Execute the API call
         user_id = "demo-user-123"  # Demo user ID
@@ -130,6 +168,9 @@ async def query_data(
             )
             
     except Exception as e:
+        print(f"[QUERY] Exception occurred: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/test-key")
