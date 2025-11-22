@@ -19,9 +19,10 @@ class QueryRequest(BaseModel):
 
 class QueryResponse(BaseModel):
     success: bool
-    data: Optional[dict] = None
+    data: Optional[dict | list] = None  # Can be dict or list (array)
     error: Optional[str] = None
     matched_function: Optional[dict] = None
+
 
 def verify_api_key(x_api_key: str = Header(...)):
     """Simple API key verification for the test chatbot."""
