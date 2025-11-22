@@ -93,3 +93,9 @@ Thumbs.db
 # User-specific files
 *.local
 .user
+
+# Publishing scripts (local use only)
+publish_to_github.bat
+publish_to_github.sh
+update_github.bat
+update_github.sh
