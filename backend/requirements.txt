@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+sqlalchemy
+pydantic
+pydantic-settings
+python-multipart
+pyyaml
+chromadb
+cryptography
+httpx
+python-jose[cryptography]
+passlib[bcrypt]
+anthropic
+openai
+sentence-transformers
+google-generativeai

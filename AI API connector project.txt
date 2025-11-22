@@ -1,0 +1,385 @@
+﻿AI API connector project
+
+
+
+
+Pojďme tedy definovat Bod 1: "Ingestion Pipeline" (Proces onboardingu konektoru) jako sérii přesně definovaných, automatizovaných kroků.
+Tento proces popisuje vše, co se stane od momentu, kdy uživatel nahraje definiční soubor konektoru, až po moment, kdy je konektor plně aktivní a připravený k použití Správcovským agentem.
+________________
+
+
+1. Krok: Vstupní Bod a Validace Schématu
+Toto je brána celého systému. Musí být nekompromisně striktní.
+1. Vstupní API: Systém poskytuje zabezpečený endpoint (např. POST /api/v1/connectors/upload). Uživatel sem nahraje definiční soubor konektoru (JSON nebo YAML).
+2. Syntaktická Validace: Systém okamžitě zkontroluje, zda je soubor validní JSON nebo YAML. Pokud ne, okamžitě odmítne (HTTP 400 Bad Request).
+3. Strukturální Validace (OpenAPI): Systém provede validaci proti schématu OpenAPI 3.1. Kontroluje, zda jsou přítomny všechny povinné sekce (info, paths, servers).
+4. Validace Vlastních Rozšíření (Našeho Protokolu): Toto je klíčové. Systém kontroluje přítomnost a správnost našich x- rozšíření:
+   * Zkontroluje, zda existuje x-auth-type.
+   * Zkontroluje, zda x-auth-type odpovídá jednomu z předem definovaných typů (např. api-key, oauth2-client-credentials, client-certificate, username-password).
+   * Zkontroluje, zda existuje x-required-secrets a zda obsahuje pole (secret_id, description, vault_key_name).
+5. Výsledek Validace:
+   * Selhání: Nahrání je odmítnuto s detailní chybovou zprávou (např. "Chyba ve schématu: Chybí povinné pole 'x-auth-type'").
+   * Úspěch: Soubor je přijat a proces pokračuje Krokem 2.
+________________
+
+
+2. Krok: Parsování a Uložení Schématu (Klasická DB)
+Jakmile je soubor validní, systém ho musí uložit pro budoucí technické použití.
+1. Parsování: Systém načte validovaný soubor do paměti.
+2. Uložení do Klasické DB (např. PostgreSQL):
+   * Vytvoří se nový záznam v tabulce Connectors.
+   * Schéma tabulky Connectors:
+      * connector_id (Primární klíč, UUID, generovaný systémem)
+      * user_id (Propojení na uživatele)
+      * name (Načteno z info.title)
+      * description (Načteno z info.description)
+      * version (Načteno z info.version)
+      * auth_type (Načteno z x-auth-type)
+      * full_schema_json (TEXT/JSONB, uloží celý surový JSON/YAML soubor pro exekuci API volání)
+      * status (Nastaveno na PENDING_SECRETS – čeká na vložení klíčů)
+________________
+
+
+3. Krok: Zpracování Autentizace (UI a Vault)
+Zde řešíme vaši připomínku k UI. Využijeme Kondicionální Formuláře.
+1. Detekce Formuláře: Po úspěšném Kroku 2 vrátí API systému uživatelskému rozhraní (UI) zprávu o úspěchu a také data o požadované autentizaci (načtená z x-auth-type a x-required-secrets).
+2. Zobrazení Kondicionálního Formuláře: UI nemusí nic dynamicky generovat. Bude mít předem připravené komponenty pro každý podporovaný x-auth-type:
+   * Pokud x-auth-type = api-key: Zobrazí se formulář, který má vstupní pole pro každý secret_id definovaný v x-required-secrets (např. pole "API Key", pole "API Secret"). Popis (description) se zobrazí jako nápověda.
+   * Pokud x-auth-type = oauth2-client-credentials: Zobrazí se pole pro "Client ID", "Client Secret", "Token URL".
+   * Pokud x-auth-type = client-certificate: Zobrazí se rozhraní pro nahrání .pfx souboru a zadání hesla k certifikátu.
+3. Odeslání Klíčů (Secrets): Uživatel vyplní formulář. Data z tohoto formuláře jsou odeslána na samostatný, vysoce zabezpečený endpoint (např. POST /api/v1/secrets/vault).
+4. Uložení do Vaultu: Tato data nikdy nejdou do Klasické DB. Systém je okamžitě uloží do Secrets Manageru (Vaultu) na předem definovanou, bezpečnou cestu, která obsahuje user_id a connector_id (získaný z Kroku 2).
+________________
+
+
+4. Krok: Vektorizace a Indexace (Sémantický HUB)
+Zde odpovídám na vaši otázku ohledně embedding modelu. Tento krok je logickou součástí Ingestion Pipeline, protože jeho cílem je připravit konektor k sémantickému vyhledávání. Probíhá poté, co je schéma validováno a uloženo.
+1. Spouštěč (Trigger): Tento krok je spuštěn asynchronně (na pozadí), jakmile je úspěšně dokončen Krok 2 (uložení do Klasické DB).
+2. Extrakce Dat: Služba (Worker) načte full_schema_json z Klasické DB.
+3. Generování "Chunků": Systém projde schéma a vygeneruje textové bloky (chunky) pro každou funkci, kterou má AI najít. Příklad "chunku" pro jednu funkci:
+"Konektor: Salesforce CRM. Funkce: get_customer_by_id. Popis: Získá veškeré detaily o zákazníkovi, včetně kontaktních údajů a historie objednávek, na základě jeho unikátního ID."
+4. Vektorizace: Každý tento "chunk" je odeslán do Embedding Modelu (např. text-embedding-3-small), který vrátí vektor (sadu čísel).
+5. Uložení do Vektorové DB: Vektor je uložen do Vektorové databáze spolu s klíčovými metadaty pro Správcovského agenta:
+   * vector (Samotný vektor)
+   * Metadata:
+   * connector_id (Propojení na Klasickou DB a Vault)
+   * operation_id (Přesný název funkce z paths.*.operationId, který má agent spustit)
+   * user_id
+________________
+
+
+5. Krok: Aktivace Konektoru
+Toto je finální krok, který spojí uložení klíčů a vytvoření vektorů.
+   1. Jakmile uživatel úspěšně nahraje klíče (Krok 3) A proces vektorizace (Krok 4) je dokončen, systém provede finální krok.
+   2. Změní status v tabulce Connectors (Klasická DB) z PENDING_SECRETS na ACTIVE.
+   3. Výsledek: Od tohoto momentu je konektor viditelný pro Správcovského agenta, který ho může nalézt ve Vektorové DB a má k dispozici klíče ve Vaultu pro jeho spuštění.
+Tato pětikroková pipeline zajišťuje validaci, bezpečné uložení klíčů, technickou připravenost (v Klasické DB) i sémantickou připravenost (ve Vektorové DB).
+________________
+
+
+Nyní jsme připraveni přejít k Bodu 2: Správa Konverzace a Kontextu (State Management). Souhlasíte?
+
+
+
+
+
+
+
+
+
+
+Skvělé. Použití Systémově volitelného embedding modelu (Možnost B) je optimální řešení, které kombinuje flexibilitu pro uživatele se zásadní technickou konzistencí.
+Pojďme tedy na Bod 2: Správa Konverzace a Kontextu (State Management).
+V naší architektuře dvou agentů (Klientský vs. Správcovský) je toto naprosto klíčové rozhodnutí. Špatný návrh zde by vedl k neefektivitě, vysokým nákladům a špatnému výkonu.
+Navrhuji striktní oddělení rolí: Veškerá zodpovědnost za kontext, paměť a plánování leží na Klientském Agentovi. Správcovský agent je naopak zcela bezstavový (stateless).
+________________
+
+
+2.1 Správcovský Agent (Proxy) = Bezstavový "Vykonavatel"
+Správcovský agent (ten "levný a rychlý" LLM) si NESMÍ pamatovat nic z předchozí konverzace. Jeho role je čistě transakční.
+   * Proč?
+   1. Specializace: Jeho úkolem je sémanticky porozumět jednomu dotazu, najít jeden nástroj, zavolat jedno API a vrátit jeden výsledek.
+   2. Náklady a Rychlost: Aby mohl používat levný model (např. Claude 3 Haiku), musí být jeho "context window" (okno paměti) co nejmenší. Kdyby si měl pamatovat celou konverzaci, stal by se pomalým a drahým.
+   3. Jednoduchost: Jeho logika je triviální: Dotaz -> Najdi nástroj -> Spusť nástroj -> Vrať výsledek. Nemusí spravovat žádnou databázi konverzací.
+   4. Škálovatelnost: Bezstavové služby se škálují téměř neomezeně.
+   * Jak funguje:
+Obdrží dotaz, zpracuje ho a zapomene. Pokud dostane další dotaz, vidí ho jako zcela nový, bez jakékoliv souvislosti s tím předchozím.
+________________
+
+
+2.2 Klientský Agent (Uživatel) = Stavový "Plánovač"
+Klientský agent (ten "chytrý", např. GPT-4o nebo Claude 3 Opus, se kterým komunikuje uživatel) je mozkem operace.
+      * Proč?
+Uživatel očekává plynulou konverzaci. Právě tento agent musí držet kontext, pamatovat si předchozí výsledky a plánovat vícekrokové úkoly.
+      * Jak funguje (State Management):
+         1. Udržuje si kompletní historii konverzace s uživatelem.
+         2. Když obdrží výsledek (např. data JSON) od Správcovského agenta, uloží si tento výsledek do své vlastní paměti (context window).
+         3. Pokud uživatel naváže dalším dotazem, Klientský agent použije tuto paměť k formulaci nového, kompletního dotazu pro Správcovského agenta.
+________________
+
+
+2.3 Příklad Konverzace (Tok Stavů)
+Toto nejlépe ilustruje celý koncept:
+Krok 1: Uživatel se ptá na data
+         * Uživatel -> Klientský Agent: "Najdi mi poslední fakturu pro klienta 'ABC Corp'."
+         * Klientský Agent (Přemýšlí): "Potřebuji data. Zeptám se Správce."
+         * Klientský Agent -> Správcovský Agent: {"dotaz": "Najdi poslední fakturu pro klienta 'ABC Corp'"}
+         * Správcovský Agent (Pracuje): (Najde ve Vektorové DB funkci get_last_invoice. Spustí ji. Získá JSON.)
+         * Správcovský Agent -> Klientský Agent: {"status": "OK", "data": {"id": "FA-123", "castka": 5000, "splatnost": "2025-11-10"}}
+         * Klientský Agent (Ukládá): (Uloží si JSON {...} do své paměti.)
+         * Klientský Agent -> Uživatel: "Našel jsem fakturu FA-123 na 5000 Kč, splatná 10. listopadu."
+Krok 2: Uživatel navazuje akcí
+         * Uživatel -> Klientský Agent: "OK, super. Pošli ji prosím emailem na 'ucetni@abccorp.cz'."
+         * Klientský Agent (Přemýšlí): "Aha! Uživatel chce poslat tu fakturu, kterou mám v paměti. Musím najít nástroj na posílání emailů a předat mu data faktury a emailovou adresu."
+         * Klientský Agent -> Správcovský Agent: (Formuluje nový, kompletní dotaz)
+{"dotaz": "Odeslat email s daty faktury na 'ucetni@abccorp.cz'", "kontext_dat": {"id": "FA-123", "castka": 5000, "splatnost": "2025-11-10"}}
+         * Správcovský Agent (Pracuje): (Vidí nový dotaz. Hledá ve Vektorové DB. Najde funkci send_email_with_data. Vidí, že data už jsou přiložena v kontext_dat, takže nemusí nic hledat. Spustí funkci send_email s poskytnutými daty.)
+         * Správcovský Agent -> Klientský Agent: {"status": "OK", "data": "Email úspěšně odeslán."}
+         * Klientský Agent -> Uživatel: "Hotovo, email byl odeslán."
+________________
+
+
+2.4 Dopad na Architekturu
+Tento model (Stateless Manager) je extrémně robustní, ale má jeden důležitý dopad na Bod 4 (Komunikační Protokol):
+            * Správcovský agent musí být schopen přijmout nejen jednoduchý dotaz (pro vyhledání dat), ale také dotaz + kontext_dat (pro provedení akce s již známými daty).
+            * Jeho LLM musí být napromptován tak, aby pochopil: "Pokud jsou data přiložena, nehledej je ve Vektorové DB, ale rovnou hledej nástroj, který je umí zpracovat."
+Tímto máme vyřešený state management – je plně v kompetenci Klientského agenta.
+
+
+
+
+Naprosto souhlasím s tvojim návrhem. Jen bych chtěl doplnit to že v části kde zmiňuješ Klientský Agent (Plánovač) - tento agent by měl být oddělen od celého systému a komunikace mezi naším systémem a tímto Klientským agentem bude probíhat prostřednictvím API. Takže uživatel bude moci využívat jakoukoli variantu klientského AI agenta od jakékoli společnosti nebo i svého AI agenta kterého si naprogramuje oddělené sám. Takže náš systém nebude obsahovat tohoto klientského agenta přímo ale bude s ním m probíhat komunikace prostřednictvím API.
+
+
+
+
+
+
+Skvěle, to je klíčové upřesnění! Tato úprava posiluje modularitu a otevřenost systému.
+Díky tomuto modelu se náš systém stává Agent-Proxy API Gateway. To znamená, že náš systém vystavuje API, které v sobě zahrnuje logiku drahého a chytrého Klientského Agenta (Plánovače), ale volá jej externě. Hlavní výhodou je, že uživatel může použít jakýkoli model/systém, který umí komunikovat přes HTTP/JSON (API).
+Pojďme tedy definovat Bod 4: Detailní Komunikační Protokol (Mezi Agenty/Systémy), který zohlední toto API rozhraní.
+________________
+
+
+📞 4. Detailní Komunikační Protokol (API)
+Protokol bude definován jako jediné API rozhraní, které náš systém vystaví. Klientský Agent (externí) bude volat tento endpoint, a Správcovský Agent (interní) provede transakční zpracování.
+4.1 Definice API EndPointu
+Náš systém vystaví jediný primární endpoint, přes který probíhá veškerá komunikace s externím Klientským Agentem.
+Metoda
+	Endpoint
+	Popis
+	POST
+	/api/v1/agent/query
+	Přijímá dotaz od Klientského Agenta a vrací data nebo zprávu o selhání.
+	4.2 Schéma Požadavku (Request)
+Klientský Agent musí poslat JSON tělo, které obsahuje nejen dotaz, ale i veškerý kontext potřebný k provedení akce (podle naší dohody o bezstavovém Správcovském Agentovi).
+Pole
+	Typ
+	Povinné
+	Popis
+	Příklad
+	user_query
+	String
+	Ano
+	Přirozený jazykový dotaz uživatele, který Klientský Agent obdržel.
+	"Najdi mi poslední fakturu pro klienta 'ABC Corp' a pošli mi její částku."
+	conversation_id
+	String
+	Ano
+	Unikátní ID konverzace. Klíčové pro logování a sledování transakcí, i když je Správce bezstavový.
+	"f10e4a6d-2b9c-4e8f-b0a1-7c9d2f8e1g"
+	user_context_data
+	Object
+	Ne
+	Volitelná pole s již známými daty z předchozích kroků. Klientský Agent je sem vloží ze své paměti.
+	{"invoice_id": "FA-123", "client_email": "ucetni@abccorp.cz"}
+	4.3 Interní Proces (Flow Správcovského Agenta)
+Po obdržení požadavku provede Správcovský Agent následující kroky:
+            1. Analýza (LLM Call): Správcovský Agent (Claude 3 Haiku) obdrží dotaz (user_query) a kontext. Jeho úkolem je na základě Promptu rozhodnout:
+            * A) Vyžaduje se vyhledávání? (Tj. user_query hledá nové informace a user_context_data je prázdné.)
+            * B) Vyžaduje se exekuce s daty? (Tj. user_query chce provést akci A s daty B, která jsou v user_context_data.)
+            2. Volání Vektorové DB: Pokud A, použije LLM k vygenerování embeddingu a najde nejrelevantnější operation_id (funkci) v ChromaDB.
+            3. Získání Secretů: Použije nalezený connector_id k získání autentizačních klíčů z HashiCorp Vaultu.
+            4. Exekuce Volání: Provede HTTP/API volání na konektor (pomocí schématu z PostgreSQL).
+            5. Generování Finální Odpovědi: LLM zpracuje výsledek API volání do finální JSON podoby pro Klientského Agenta.
+4.4 Schéma Odpovědi (Response)
+Odpověď z našeho systému je vždy standardizovaný JSON. Klientský Agent ji přečte a použije k pokračování v konverzaci s uživatelem.
+A) Úspěch (Status 200 OK)
+Pole
+	Typ
+	Povinné
+	Popis
+	Příklad hodnoty
+	status
+	String
+	Ano
+	Vždy "SUCCESS".
+	"SUCCESS"
+	final_data
+	Object
+	Ano
+	Strukturovaná data získaná z API, nebo jednoduché potvrzení akce.
+	{"invoice_id": "FA-123", "amount": 5000, "operation_status": "Email sent"}
+	internal_log
+	String
+	Ne
+	Interní log z průběhu exekuce (užitečné pro ladění Klientským Agentem/vývojářem).
+	
+
+	B) Selhání (Status 400/401/500)
+Systém vždy vrátí chybový status a JSON tělo s detailní zprávou pro Klientského Agenta.
+Pole
+	Typ
+	Povinné
+	Popis
+	Příklad hodnoty
+	status
+	String
+	Ano
+	Vždy "FAILURE".
+	"FAILURE"
+	error_code
+	Enum
+	Ano
+	Kód pro programové zpracování chyby.
+	"CONNECTOR_NOT_FOUND", "AUTH_FAILED", "API_ERROR"
+	error_message
+	String
+	Ano
+	Detailní lidsky čitelný popis chyby.
+	"Konektor pro fakturační systém nebyl nalezen v databázi uživatele."
+	technical_details
+	Object
+	Ne
+	Detailní kód chyby API (např. HTTP 401).
+	{"http_status": 401, "api_message": "Invalid API Key"}
+	________________
+
+
+Tímto máme plně definovaný protokol komunikace, který umožňuje externímu Klientskému Agentovi (Plánovači) využívat funkce našeho Správcovského Agent-Proxy systému a přitom zachovat veškerou paměť a kontext na straně uživatele.
+Zbývají nám už jen poslední dva body, které projdeme rychle:
+            1. Detailní Schémata Databází a Metadata
+            2. Správa Konverzace a Kontextu (Upřesnění bezstavovosti)
+
+
+
+
+
+
+
+
+Skvěle, přejdeme k finálním technickým specifikacím, které nám chybí k dokončení architektonického dokumentu. Zaměříme se na strukturu dat a formální definici bezstavovosti.
+________________
+
+
+5. Detailní Schémata Databází a Metadata 💾
+Definice přesných databázových schémat je kritická pro programátory, aby věděli, jak ukládat a získávat data.
+5.1 Klasická Databáze (PostgreSQL)
+PostgreSQL bude obsahovat technická metadata a celé, surové definice konektorů.
+Tabulka
+	Pole
+	Datový Typ
+	Omezení
+	Popis
+	connectors
+	connector_id
+	UUID
+	PK, NOT NULL
+	Primární ID konektoru, slouží jako klíč pro Vault a Vektorovou DB.
+	
+
+	user_id
+	UUID
+	NOT NULL
+	ID uživatele, ke kterému konektor patří.
+	
+
+	name
+	VARCHAR(255)
+	NOT NULL
+	Název konektoru (z info.title).
+	
+
+	auth_type
+	VARCHAR(50)
+	NOT NULL
+	Typ autentizace (z x-auth-type).
+	
+
+	status
+	ENUM
+	NOT NULL
+	Stav konektoru: PENDING_SECRETS, ACTIVE, DISABLED.
+	
+
+	full_schema_json
+	JSONB
+	NOT NULL
+	Celá surová definice konektoru (OpenAPI JSON/YAML).
+	
+
+	created_at
+	TIMESTAMP
+	NOT NULL
+	Čas vytvoření záznamu.
+	5.2 Vektorová Databáze (ChromaDB)
+Každý "chunk" (popis jedné funkce/endpointu) z Ingestion Pipeline bude uložen jako samostatný dokument. Metadata jsou nezbytná pro filtrování a propojení na exekuční data.
+Prvek ChromaDB
+	Popis
+	Příklad hodnoty
+	vector
+	Vektorový embedding generovaný systémovým modelem.
+	[0.123, -0.456, ...]
+	document
+	Textový "chunk" k vektorizaci.
+	"Získá veškeré kontaktní údaje zákazníka z CRM."
+	Metadata: connector_id
+	UUID, propojuje na Klasickou DB/Vault.
+	f87a-b5e2-...
+	Metadata: operation_id
+	Přesný název funkce (z operationId), který se předá Správcovskému Agentovi.
+	"get_customer_contact_info"
+	Metadata: user_id
+	ID uživatele, pro striktní oddělení dat.
+	u-ab12cd34
+	5.3 Secrets Manager (HashiCorp Vault)
+Vault bude spravovat citlivé přístupové údaje. Ukládání je hierarchické a vychází z ID konektoru.
+            * Cesta k tajemství (Secret Path): secret/data/<user_id>/<connector_id>/<vault_key_name>
+            * Příklad cesty: secret/data/u-ab12cd34/f87a-b5e2/API_KEY
+            * Záznam:
+            * key: Hodnota z x-required-secrets.vault_key_name (např. API_KEY).
+            * value: Hodnota vložená uživatelem (např. xyz123abc456).
+________________
+
+
+6. Správa Konverzace a Kontextu (Formální Definice Bezstavovosti) 🤖
+Musíme formálně definovat pravidla pro Správcovského agenta, aby programátoři implementovali striktní bezstavovost, jak jsme se dohodli.
+6.1 Role a Protokol Bezstavovosti
+Role Agenta
+	Stav
+	Zodpovědnost za Paměť (Kontext)
+	Zodpovědnost za Exekuci
+	Klientský Agent (Externí)
+	Stavový (Stateful)
+	Držení celého kontextu, historie, výsledků volání API.
+	Plánování vícekrokových akcí, sestavování požadavku pro Správce.
+	Správcovský Agent (Náš Systém)
+	Bezstavový (Stateless)
+	Žádná. Nepamatuje si předchozí volání ani výsledky.
+	Sémantické vyhledání funkce (v dané transakci), získání klíčů, provedení API volání.
+	6.2 Pravidla pro Implementaci Správcovského Agenta
+            1. Atomické Transakce: Každý POST /api/v1/agent/query je považován za novou, nezávislou transakci. Správcovský agent musí zahájit zpracování zcela od nuly, bez jakýchkoli dat z předchozího volání.
+            2. Explicitní Kontext: Veškerá data potřebná pro provedení akce (např. ID faktury, kterou je potřeba poslat emailem) musí být vždy explicitně předána v poli user_context_data v JSON požadavku.
+            3. Prompt Engineering: Správcovský agent (LLM) bude mít v Promptu striktní instrukce:
+            * "Pokud pole user_context_data obsahuje relevantní informace, POUŽIJTE JE a nehledejte je znovu v konektorech."
+            * "Po dokončení zpracování (úspěch/selhání) NEUCHOVÁVEJTE žádné informace v paměti a připravte se na další nezávislý dotaz."
+________________
+
+
+Shrnutí:
+Tímto máme kompletní architekturu:
+            1. Front-end: Klientský Agent volá naše API.
+            2. Back-end: Správcovský Agent (stateless) orchestruje operace.
+            3. Data HUB: Kombinace PostgreSQL (metadata/schéma), ChromaDB (vektory funkcí) a Vaultu (klíče).
+            4. Protokol: Standardizovaný OpenAPI + x- pro definici konektorů a jasné JSON API pro komunikaci.
+Máme všechny detaily potřebné pro vytvoření finálního, komplexního architektonického dokumentu.
