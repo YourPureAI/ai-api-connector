@@ -266,3 +266,208 @@ def _fallback_extraction(query: str, param_definitions: List[Dict[str, Any]]) ->
                     params[param_name] = int(numbers[-1]) if param_type == "integer" else float(numbers[-1])
     
     return params
+
+
+async def assess_function_matches(
+    query: str,
+    candidates: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """
+    Use LLM to assess which function (if any) best matches the user's query.
+    
+    Args:
+        query: The natural language query from the user
+        candidates: List of candidate functions from vector DB, each containing:
+            - metadata: Dict with connector_id, operation_id, path, method
+            - document: The semantic description of the function
+            - distance: Similarity score from vector DB
+    
+    Returns:
+        Dictionary with:
+        - selected: bool - Whether a suitable function was found
+        - index: int or None - Index of the selected candidate (if selected=True)
+        - reasoning: str - Explanation of the decision
+        - confidence: str - "high", "medium", "low", or "none"
+    """
+    # Get LLM configuration
+    config = vault.get_secrets("system", "global_config")
+    if not config:
+        # Fallback: use the top result if available
+        if candidates and len(candidates) > 0:
+            return {
+                "selected": True,
+                "index": 0,
+                "reasoning": "No LLM configured, using top vector DB result",
+                "confidence": "low"
+            }
+        else:
+            return {
+                "selected": False,
+                "index": None,
+                "reasoning": "No candidates available",
+                "confidence": "none"
+            }
+    
+    provider = config.get("agentProvider", "openai")
+    model = config.get("agentModel", "gpt-4o")
+    
+    # Build the assessment prompt
+    prompt = _build_assessment_prompt(query, candidates)
+    
+    # Call the appropriate LLM
+    try:
+        if provider == "openai":
+            result = await _call_openai(prompt, model, config.get("openaiApiKey"))
+        elif provider == "anthropic":
+            result = await _call_anthropic(prompt, model, config.get("anthropicApiKey"))
+        elif provider == "google":
+            result = await _call_google(prompt, model, config.get("googleApiKey"))
+        else:
+            # Fallback: use the top result
+            return {
+                "selected": True,
+                "index": 0,
+                "reasoning": "Unknown LLM provider, using top vector DB result",
+                "confidence": "low"
+            }
+        
+        # Parse the LLM assessment response
+        return _parse_assessment_response(result, len(candidates))
+    
+    except Exception as e:
+        print(f"LLM assessment failed: {e}, using top result as fallback")
+        import traceback
+        traceback.print_exc()
+        
+        # Fallback: use the top result if available
+        if candidates and len(candidates) > 0:
+            return {
+                "selected": True,
+                "index": 0,
+                "reasoning": f"LLM assessment failed: {str(e)}, using top vector DB result",
+                "confidence": "low"
+            }
+        else:
+            return {
+                "selected": False,
+                "index": None,
+                "reasoning": "No candidates available",
+                "confidence": "none"
+            }
+
+
+def _build_assessment_prompt(query: str, candidates: List[Dict[str, Any]]) -> str:
+    """Build a prompt for the LLM to assess function matches."""
+    
+    # Format candidate information
+    candidates_info = []
+    for i, candidate in enumerate(candidates):
+        metadata = candidate.get("metadata", {})
+        document = candidate.get("document", "")
+        distance = candidate.get("distance", 0.0)
+        
+        connector_id = metadata.get("connector_id", "unknown")
+        operation_id = metadata.get("operation_id", "unknown")
+        path = metadata.get("path", "unknown")
+        method = metadata.get("method", "unknown").upper()
+        
+        candidates_info.append(
+            f"""Candidate {i}:
+  Operation: {operation_id}
+  Endpoint: {method} {path}
+  Description: {document}
+  Similarity Score: {1 - distance:.3f}"""
+        )
+    
+    candidates_text = "\n\n".join(candidates_info)
+    
+    prompt = f"""You are a function selection assistant. Your task is to determine which API function (if any) best matches the user's request.
+
+User Query: "{query}"
+
+Available Functions:
+{candidates_text}
+
+Analyze the user's query and determine:
+1. Does any of these functions actually match what the user is asking for?
+2. If yes, which function is the BEST match?
+3. If no suitable function exists, clearly state that none of the functions match the user's request.
+
+IMPORTANT:
+- Be strict in your assessment. Only select a function if it genuinely provides what the user is asking for.
+- If the user is asking for data or functionality that none of these functions provide, respond with "NONE".
+- Consider the operation description, endpoint path, and HTTP method.
+- The similarity score is a hint but not definitive - use your judgment.
+
+Respond with a JSON object in this exact format:
+{{
+  "selected": true or false,
+  "index": <number 0-{len(candidates)-1} or null>,
+  "reasoning": "<brief explanation of your decision>",
+  "confidence": "<high|medium|low|none>"
+}}
+
+Examples:
+- If Candidate 1 is the best match: {{"selected": true, "index": 1, "reasoning": "...", "confidence": "high"}}
+- If none match: {{"selected": false, "index": null, "reasoning": "None of the available functions provide the requested functionality", "confidence": "none"}}
+
+Response:"""
+    
+    return prompt
+
+
+def _parse_assessment_response(response: str, num_candidates: int) -> Dict[str, Any]:
+    """Parse the LLM assessment response."""
+    try:
+        # Try to extract JSON from the response
+        response = response.strip()
+        
+        # Remove markdown code blocks if present
+        if response.startswith("```"):
+            lines = response.split("\n")
+            response = "\n".join(lines[1:-1]) if len(lines) > 2 else response
+            response = response.replace("```json", "").replace("```", "").strip()
+        
+        # Parse JSON
+        assessment = json.loads(response)
+        
+        # Validate the response structure
+        if not isinstance(assessment, dict):
+            raise ValueError("Response is not a JSON object")
+        
+        selected = assessment.get("selected", False)
+        index = assessment.get("index")
+        reasoning = assessment.get("reasoning", "No reasoning provided")
+        confidence = assessment.get("confidence", "low")
+        
+        # Validate index
+        if selected and (index is None or not isinstance(index, int) or index < 0 or index >= num_candidates):
+            print(f"Warning: Invalid index {index}, defaulting to 0")
+            index = 0
+        
+        return {
+            "selected": bool(selected),
+            "index": int(index) if selected and index is not None else None,
+            "reasoning": str(reasoning),
+            "confidence": str(confidence)
+        }
+    
+    except Exception as e:
+        print(f"Failed to parse LLM assessment response: {e}")
+        print(f"Response was: {response}")
+        
+        # Fallback: assume top result is best if we have candidates
+        if num_candidates > 0:
+            return {
+                "selected": True,
+                "index": 0,
+                "reasoning": f"Failed to parse LLM response, using top result. Error: {str(e)}",
+                "confidence": "low"
+            }
+        else:
+            return {
+                "selected": False,
+                "index": None,
+                "reasoning": "No candidates available",
+                "confidence": "none"
+            }

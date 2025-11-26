@@ -81,3 +81,14 @@ POST http://localhost:8000/api/v1/agent/query
 
 - **Backend**: FastAPI, SQLAlchemy (SQLite), ChromaDB, Local Vault.
 - **Frontend**: React, Vite, TailwindCSS.
+
+## Documentation
+
+For detailed information about specific features:
+
+- **[Installation Guide](INSTALLATION.md)** - Detailed setup instructions
+- **[API Integration](API_INTEGRATION.md)** - How to integrate with the system
+- **[LLM Parameter Extraction](LLM_PARAMETER_EXTRACTION.md)** - How parameters are extracted from queries
+- **[LLM Function Assessment](LLM_FUNCTION_ASSESSMENT.md)** - How the system selects the right API function
+- **[GitHub Publishing](GITHUB_PUBLISHING.md)** - Publishing and deployment guide
+

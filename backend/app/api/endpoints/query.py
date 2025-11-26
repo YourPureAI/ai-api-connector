@@ -47,20 +47,60 @@ async def query_data(
     """
     try:
         # Search vector DB for matching functions using configured embedding model
-        results = vector_db.search_functions(request.query, n_results=1)
+        # Retrieve multiple results for LLM assessment
+        results = vector_db.search_functions(request.query, n_results=5)
         
         if not results or not results.get("ids") or len(results["ids"][0]) == 0:
             return QueryResponse(
                 success=False,
-                error="No matching connector function found for this query"
+                error="No matching connector functions found in the database. Please ensure you have uploaded and configured the necessary API connectors."
             )
         
-        # Get the best match
-        metadata = results["metadatas"][0][0]
+        # Prepare candidates for LLM assessment
+        candidates = []
+        for i in range(len(results["ids"][0])):
+            candidates.append({
+                "metadata": results["metadatas"][0][i],
+                "document": results["documents"][0][i],
+                "distance": results["distances"][0][i] if "distances" in results else 0.0
+            })
+        
+        print(f"[QUERY] Found {len(candidates)} candidate functions from vector DB")
+        print(f"[QUERY] User query: {request.query}")
+        
+        # Use LLM to assess which function (if any) best matches the query
+        from app.services.llm_service import assess_function_matches
+        
+        print(f"[QUERY] Calling LLM to assess function matches...")
+        assessment = await assess_function_matches(request.query, candidates)
+        
+        print(f"[QUERY] LLM Assessment: {assessment}")
+        
+        # Check if a suitable function was selected
+        if not assessment.get("selected"):
+            # No suitable function found
+            reasoning = assessment.get("reasoning", "No suitable function found")
+            return QueryResponse(
+                success=False,
+                error=f"The requested data or functionality is not available. {reasoning}"
+            )
+        
+        # Get the selected candidate
+        selected_index = assessment.get("index", 0)
+        if selected_index >= len(candidates):
+            selected_index = 0
+        
+        selected_candidate = candidates[selected_index]
+        metadata = selected_candidate["metadata"]
+        
         connector_id = metadata["connector_id"]
         operation_id = metadata["operation_id"]
         path = metadata["path"]
         method = metadata["method"]
+        
+        print(f"[QUERY] Selected function: {operation_id} ({method.upper()} {path})")
+        print(f"[QUERY] Confidence: {assessment.get('confidence', 'unknown')}")
+        print(f"[QUERY] Reasoning: {assessment.get('reasoning', 'N/A')}")
         
         # Get connector from database
         connector = db.query(Connector).filter(Connector.connector_id == connector_id).first()
@@ -80,7 +120,6 @@ async def query_data(
         # Extract parameters from the query if needed
         parameters = request.parameters or {}
         
-        print(f"[QUERY] User query: {request.query}")
         print(f"[QUERY] Matched path: {path}")
         print(f"[QUERY] Matched method: {method}")
         
@@ -153,7 +192,11 @@ async def query_data(
                     "connector": connector.name,
                     "operation": operation_id,
                     "path": path,
-                    "method": method
+                    "method": method,
+                    "assessment": {
+                        "confidence": assessment.get("confidence", "unknown"),
+                        "reasoning": assessment.get("reasoning", "N/A")
+                    }
                 }
             )
         else:
