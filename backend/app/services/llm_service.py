@@ -118,7 +118,7 @@ async def _call_openai(prompt: str, model: str, api_key: str) -> str:
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.1,
-        "max_tokens": 200
+        "max_tokens": 500  # Increased from 200
     }
     
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -144,7 +144,7 @@ async def _call_anthropic(prompt: str, model: str, api_key: str) -> str:
     
     payload = {
         "model": model,
-        "max_tokens": 200,
+        "max_tokens": 500,  # Increased from 200
         "temperature": 0.1,
         "messages": [
             {"role": "user", "content": prompt}
@@ -178,7 +178,7 @@ async def _call_google(prompt: str, model: str, api_key: str) -> str:
         }],
         "generationConfig": {
             "temperature": 0.1,
-            "maxOutputTokens": 200
+            "maxOutputTokens": 500  # Increased from 200 to prevent MAX_TOKENS cutoff
         }
     }
     
@@ -186,7 +186,36 @@ async def _call_google(prompt: str, model: str, api_key: str) -> str:
         response = await client.post(url, json=payload)
         response.raise_for_status()
         result = response.json()
-        return result["candidates"][0]["content"]["parts"][0]["text"]
+        
+        # Debug: print the response structure
+        print(f"[DEBUG] Google API response keys: {result.keys()}")
+        
+        # Handle different response structures
+        if "candidates" not in result:
+            raise ValueError(f"No candidates in response. Response: {result}")
+        
+        if not result["candidates"]:
+            raise ValueError(f"Empty candidates list. Response: {result}")
+        
+        candidate = result["candidates"][0]
+        
+        # Check for content filtering or blocked content
+        if "content" not in candidate:
+            # Check if there's a finish reason
+            finish_reason = candidate.get("finishReason", "UNKNOWN")
+            safety_ratings = candidate.get("safetyRatings", [])
+            raise ValueError(f"No content in candidate. Finish reason: {finish_reason}, Safety ratings: {safety_ratings}")
+        
+        content = candidate["content"]
+        
+        # Check if content is empty (common with content filtering)
+        if "parts" not in content or not content.get("parts"):
+            # This often happens with content filtering or safety blocks
+            finish_reason = candidate.get("finishReason", "UNKNOWN")
+            safety_ratings = candidate.get("safetyRatings", [])
+            raise ValueError(f"Empty or missing parts in content (likely content filtering). Content: {content}, Finish reason: {finish_reason}, Safety ratings: {safety_ratings}")
+        
+        return content["parts"][0]["text"]
 
 
 def _parse_llm_response(response: str, param_definitions: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -291,22 +320,41 @@ async def assess_function_matches(
     """
     # Get LLM configuration
     config = vault.get_secrets("system", "global_config")
+    
+    # Log assessment details
+    print(f"[ASSESSMENT] Query: {query}")
+    print(f"[ASSESSMENT] Candidates: {len(candidates)}")
+    print(f"[ASSESSMENT] LLM configured: {config is not None}")
+    if candidates and len(candidates) > 0:
+        top_distance = candidates[0].get("distance", 1.0)
+        top_similarity = 1 - top_distance
+        print(f"[ASSESSMENT] Top candidate similarity: {top_similarity:.3f}")
+        print(f"[ASSESSMENT] Top candidate: {candidates[0].get('metadata', {}).get('operation_id', 'unknown')}")
+    
     if not config:
-        # Fallback: use the top result if available
+        # No LLM configured - use similarity threshold
         if candidates and len(candidates) > 0:
-            return {
-                "selected": True,
-                "index": 0,
-                "reasoning": "No LLM configured, using top vector DB result",
-                "confidence": "low"
-            }
-        else:
-            return {
-                "selected": False,
-                "index": None,
-                "reasoning": "No candidates available",
-                "confidence": "none"
-            }
+            distance = candidates[0].get("distance", 1.0)
+            similarity = 1 - distance
+            
+            # Use reasonable threshold (0.40+) for auto-selection
+            if similarity >= 0.40:
+                print(f"[ASSESSMENT] No LLM configured, but reasonable similarity ({similarity:.3f}) - auto-selecting")
+                return {
+                    "selected": True,
+                    "index": 0,
+                    "reasoning": f"No LLM configured. Auto-selected top result with similarity ({similarity:.2f}). Configure an LLM for better assessment.",
+                    "confidence": "high" if similarity >= 0.80 else ("medium" if similarity >= 0.60 else "low")
+                }
+        
+        # Reject if no LLM and low similarity
+        print(f"[ASSESSMENT] No LLM configured and similarity too low ({similarity:.3f}) - rejecting")
+        return {
+            "selected": False,
+            "index": None,
+            "reasoning": f"No LLM configured and similarity too low ({similarity:.2f}). Please configure an LLM provider in settings for intelligent function assessment.",
+            "confidence": "none"
+        }
     
     provider = config.get("agentProvider", "openai")
     model = config.get("agentModel", "gpt-4o")
@@ -335,25 +383,33 @@ async def assess_function_matches(
         return _parse_assessment_response(result, len(candidates))
     
     except Exception as e:
-        print(f"LLM assessment failed: {e}, using top result as fallback")
+        print(f"[ASSESSMENT] LLM assessment failed: {e}")
         import traceback
         traceback.print_exc()
         
-        # Fallback: use the top result if available
+        # When LLM fails, use similarity threshold as fallback
         if candidates and len(candidates) > 0:
-            return {
-                "selected": True,
-                "index": 0,
-                "reasoning": f"LLM assessment failed: {str(e)}, using top vector DB result",
-                "confidence": "low"
-            }
-        else:
-            return {
-                "selected": False,
-                "index": None,
-                "reasoning": "No candidates available",
-                "confidence": "none"
-            }
+            distance = candidates[0].get("distance", 1.0)
+            similarity = 1 - distance
+            
+            # Use reasonable threshold (0.40+) when LLM fails
+            if similarity >= 0.40:
+                print(f"[ASSESSMENT] LLM failed but reasonable similarity ({similarity:.3f}) - auto-selecting with warning")
+                return {
+                    "selected": True,
+                    "index": 0,
+                    "reasoning": f"LLM assessment failed ({str(e)}), but auto-selected due to reasonable similarity ({similarity:.2f}). Please check LLM configuration.",
+                    "confidence": "high" if similarity >= 0.80 else ("medium" if similarity >= 0.60 else "low")
+                }
+        
+        # Reject if LLM failed and similarity is too low
+        print(f"[ASSESSMENT] LLM failed and similarity too low ({similarity:.3f}) - rejecting for safety")
+        return {
+            "selected": False,
+            "index": None,
+            "reasoning": f"LLM assessment failed ({str(e)}) and similarity too low ({similarity:.2f}). Please check your LLM configuration in settings.",
+            "confidence": "none"
+        }
 
 
 def _build_assessment_prompt(query: str, candidates: List[Dict[str, Any]]) -> str:
@@ -388,16 +444,28 @@ User Query: "{query}"
 Available Functions:
 {candidates_text}
 
-Analyze the user's query and determine:
-1. Does any of these functions actually match what the user is asking for?
-2. If yes, which function is the BEST match?
-3. If no suitable function exists, clearly state that none of the functions match the user's request.
+CRITICAL ASSESSMENT RULES:
+1. Only select a function if it DIRECTLY provides the data or performs the action the user is requesting
+2. If the user is asking about a different domain/service than what these functions provide - REJECT
+3. If the user is asking a general question, greeting, or help request - REJECT
+4. Consider: Does this function actually answer the user's specific question?
+
+Examples of when to REJECT (return selected: false):
+- User asks about GitHub commits, but only Pet Store APIs available → REJECT (wrong domain)
+- User asks about weather data, but only Pet Store APIs available → REJECT (wrong domain)
+- User asks "Hello, how can you help?" → REJECT (greeting, not a data request)
+- User asks "What can you do?" → REJECT (general question)
+- User asks about user accounts, but only Pet APIs available → REJECT (wrong domain)
+
+Examples of when to SELECT (return selected: true):
+- User asks "Get pet with ID 123" and getPetById is available → SELECT getPetById
+- User asks "Show me all pets" and listPets is available → SELECT listPets
+- User asks "Create a new pet" and createPet is available → SELECT createPet
 
 IMPORTANT:
-- Be strict in your assessment. Only select a function if it genuinely provides what the user is asking for.
-- If the user is asking for data or functionality that none of these functions provide, respond with "NONE".
-- Consider the operation description, endpoint path, and HTTP method.
-- The similarity score is a hint but not definitive - use your judgment.
+- Be VERY strict in your assessment
+- The similarity score is just a hint - use your judgment about whether the function actually matches
+- When in doubt, REJECT rather than selecting an incorrect function
 
 Respond with a JSON object in this exact format:
 {{
@@ -408,8 +476,8 @@ Respond with a JSON object in this exact format:
 }}
 
 Examples:
-- If Candidate 1 is the best match: {{"selected": true, "index": 1, "reasoning": "...", "confidence": "high"}}
-- If none match: {{"selected": false, "index": null, "reasoning": "None of the available functions provide the requested functionality", "confidence": "none"}}
+- If Candidate 1 is the best match: {{"selected": true, "index": 1, "reasoning": "This function retrieves pet data by ID, which matches the user's request", "confidence": "high"}}
+- If none match: {{"selected": false, "index": null, "reasoning": "User is asking about GitHub commits but only Pet Store functions are available", "confidence": "none"}}
 
 Response:"""
     
